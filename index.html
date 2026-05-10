@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="./logo.png" type="image/png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tsunami Painting Board - Shareable</title>
+    <style>
+      body,
+      html {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: #0b0b0b;
+        overflow: hidden;
+        font-family: sans-serif;
+      }
+      .toolbar {
+        position: fixed;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: #1e1f22;
+        padding: 8px 15px;
+        border-radius: 50px;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        z-index: 100;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+        border: 1px solid #333;
+      }
+      .btn {
+        background: #2b2d31;
+        border: none;
+        color: white;
+        padding: 8px;
+        border-radius: 10px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      .btn.active {
+        background: #5865f2;
+        font-weight: bold;
+      }
+      canvas {
+        display: block;
+      }
+      .control-group {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        color: #aaa;
+        font-size: 9px;
+      }
+      #brush-preview {
+        position: fixed;
+        border: 1px solid #fff;
+        border-radius: 50%;
+        pointer-events: none;
+        transform: translate(-50%, -50%);
+        display: none;
+        z-index: 99;
+      }
+      .zoom-info {
+        color: #5865f2;
+        font-weight: bold;
+        min-width: 40px;
+        text-align: center;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="brush-preview"></div>
+    <div class="toolbar">
+      <p
+        style="
+          font-size: 16px;
+          color: whitesmoke;
+          margin-left: 15px;
+          margin-right: 15px;
+        "
+      >
+        Tsunami Painting Board
+      </p>
+      <input type="color" id="colorPicker" value="#ffffff" />
+      <button id="penBtn" class="btn active" title="펜">✏️</button>
+      <button id="lineBtn" class="btn" title="직선">📏</button>
+      <button id="textBtn" class="btn" title="텍스트">T</button>
+      <button id="selectBtn" class="btn" title="분리 이동">✨</button>
+      <button id="handBtn" class="btn" title="화면 이동">✋</button>
+      <div class="control-group">
+        <span>크기</span
+        ><input type="range" id="lineWidth" min="1" max="100" value="5" />
+      </div>
+      <div class="control-group">
+        <span>투명</span
+        ><input type="range" id="opacity" min="1" max="100" value="100" />
+      </div>
+      <div class="zoom-info" id="zoomLevel">100%</div>
+      <button id="undoBtn" class="btn">↩️</button>
+      <button id="clearBtn" class="btn" style="background: #ed4245">🗑️</button>
+      <button id="copyUrlBtn" class="btn" style="background: #3ba55c">
+        🔗
+      </button>
+    </div>
+    <canvas id="canvas"></canvas>
+    <script>
+      const canvas = document.getElementById("canvas"),
+        ctx = canvas.getContext("2d");
+      const preview = document.getElementById("brush-preview"),
+        zoomText = document.getElementById("zoomLevel");
+      const colorPicker = document.getElementById("colorPicker"),
+        lwInput = document.getElementById("lineWidth"),
+        opInput = document.getElementById("opacity");
+
+      let lines = [],
+        redoStack = [],
+        currentItem = null,
+        selectionPath = [],
+        selectedItems = [];
+      let isDrawing = false,
+        isPanning = false,
+        isSelecting = false,
+        isMoving = false;
+      let mode = "pen",
+        scale = 1,
+        offsetX = 0,
+        offsetY = 0,
+        startX,
+        startY;
+
+      // URL 데이터 저장/불러오기 핵심 로직
+      function saveData() {
+        const data = JSON.stringify(lines);
+        const encoded = btoa(encodeURIComponent(data)); // Base64 인코딩
+        window.history.replaceState(null, null, "#" + encoded);
+      }
+
+      function loadData() {
+        const hash = window.location.hash.substring(1);
+        if (!hash) return;
+        try {
+          lines = JSON.parse(decodeURIComponent(atob(hash)));
+          render();
+        } catch (e) {
+          console.error("데이터 복구 실패");
+        }
+      }
+
+      function render() {
+        ctx.fillStyle = "#0b0b0b";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.save();
+        ctx.translate(offsetX, offsetY);
+        ctx.scale(scale, scale);
+
+        [...lines, currentItem].forEach((item) => {
+          if (!item || (item.type === "pen" && !item.points.length)) return;
+          ctx.globalAlpha = item.opacity || 1;
+          ctx.strokeStyle = ctx.fillStyle = item.color;
+          ctx.lineWidth = item.width;
+          ctx.lineCap = ctx.lineJoin = "round";
+          ctx.beginPath();
+          if (item.type === "pen") {
+            item.points.forEach((p, i) =>
+              i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y),
+            );
+            ctx.stroke();
+          } else if (item.type === "line") {
+            ctx.moveTo(item.x1, item.y1);
+            ctx.lineTo(item.x2, item.y2);
+            ctx.stroke();
+          } else if (item.type === "text") {
+            ctx.font = `${item.width * 5}px sans-serif`;
+            ctx.fillText(item.text, item.x, item.y);
+          }
+        });
+
+        if (isSelecting && selectionPath.length > 1) {
+          ctx.setLineDash([5, 5]);
+          ctx.strokeStyle = "#5865f2";
+          ctx.lineWidth = 1 / scale;
+          ctx.beginPath();
+          selectionPath.forEach((p, i) =>
+            i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y),
+          );
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+        ctx.restore();
+      }
+
+      const toWorld = (x, y) => ({
+        x: (x - offsetX) / scale,
+        y: (y - offsetY) / scale,
+      });
+
+      canvas.onmousedown = (e) => {
+        const w = toWorld(e.clientX, e.clientY);
+        startX = e.clientX;
+        startY = e.clientY;
+        if (mode === "select") {
+          if (selectedItems.length > 0 && isPointInPoly(w, selectionPath))
+            isMoving = true;
+          else {
+            selectionPath = [w];
+            selectedItems = [];
+            isSelecting = true;
+          }
+        } else if (mode === "hand") isPanning = true;
+        else if (mode === "text") {
+          const t = prompt("입력:");
+          if (t) {
+            lines.push({
+              type: "text",
+              x: w.x,
+              y: w.y,
+              text: t,
+              color: colorPicker.value,
+              width: lwInput.value,
+              opacity: opInput.value / 100,
+            });
+            saveData();
+          }
+        } else {
+          isDrawing = true;
+          currentItem = {
+            type: mode,
+            color: colorPicker.value,
+            width: lwInput.value,
+            opacity: opInput.value / 100,
+            x1: w.x,
+            y1: w.y,
+            x2: w.x,
+            y2: w.y,
+            points: [w],
+          };
+        }
+        render();
+      };
+
+      window.onmousemove = (e) => {
+        const w = toWorld(e.clientX, e.clientY);
+        if (isSelecting) selectionPath.push(w);
+        else if (isMoving) {
+          const dx = (e.clientX - startX) / scale,
+            dy = (e.clientY - startY) / scale;
+          selectedItems.forEach((item) => {
+            if (item.type === "pen")
+              item.points.forEach((p) => {
+                p.x += dx;
+                p.y += dy;
+              });
+            else if (item.type === "line") {
+              item.x1 += dx;
+              item.y1 += dy;
+              item.x2 += dx;
+              item.y2 += dy;
+            } else if (item.type === "text") {
+              item.x += dx;
+              item.y += dy;
+            }
+          });
+          selectionPath.forEach((p) => {
+            p.x += dx;
+            p.y += dy;
+          });
+          startX = e.clientX;
+          startY = e.clientY;
+        } else if (isPanning) {
+          offsetX += e.clientX - startX;
+          offsetY += e.clientY - startY;
+          startX = e.clientX;
+          startY = e.clientY;
+        } else if (isDrawing) {
+          if (mode === "pen") currentItem.points.push(w);
+          else {
+            currentItem.x2 = w.x;
+            currentItem.y2 = w.y;
+          }
+        }
+        preview.style.display =
+          mode === "pen" || mode === "line" ? "block" : "none";
+        preview.style.width = preview.style.height =
+          lwInput.value * scale + "px";
+        preview.style.left = e.clientX + "px";
+        preview.style.top = e.clientY + "px";
+        preview.style.borderColor = colorPicker.value;
+        render();
+      };
+
+      window.onmouseup = () => {
+        if (isSelecting) {
+          selectionPath.push(selectionPath[0]);
+          let nl = [];
+          selectedItems = [];
+
+          lines.forEach((item) => {
+            if (item.type === "pen") {
+              let currentSegment = [];
+              let isPreviousInside = null;
+
+              item.points.forEach((p) => {
+                const isInside = isPointInPoly(p, selectionPath);
+
+                // 상태가 변했을 때 (안에서 밖으로, 혹은 밖에서 안으로) 선을 끊음
+                if (
+                  isPreviousInside !== null &&
+                  isInside !== isPreviousInside
+                ) {
+                  if (currentSegment.length > 0) {
+                    let newItem = { ...item, points: currentSegment };
+                    if (isPreviousInside) {
+                      selectedItems.push(newItem);
+                    }
+                    nl.push(newItem);
+                  }
+                  currentSegment = [];
+                }
+
+                currentSegment.push(p);
+                isPreviousInside = isInside;
+              });
+
+              // 마지막 남은 세그먼트 처리
+              if (currentSegment.length > 0) {
+                let newItem = { ...item, points: currentSegment };
+                if (isPreviousInside) {
+                  selectedItems.push(newItem);
+                }
+                nl.push(newItem);
+              }
+            } else {
+              // 직선이나 텍스트는 기존 로직 유지 (점 하나 기준)
+              let p =
+                item.type === "line"
+                  ? { x: item.x1, y: item.y1 }
+                  : { x: item.x, y: item.y };
+              if (isPointInPoly(p, selectionPath)) {
+                selectedItems.push(item);
+              }
+              nl.push(item);
+            }
+          });
+
+          lines = nl;
+          if (!selectedItems.length) selectionPath = [];
+          saveData();
+        }
+
+        if (isDrawing && currentItem) {
+          lines.push(currentItem);
+          saveData();
+        }
+        if (isMoving) saveData();
+
+        isDrawing = isPanning = isSelecting = isMoving = false;
+        currentItem = null;
+        render();
+      };
+
+      window.addEventListener(
+        "wheel",
+        (e) => {
+          e.preventDefault();
+          const w = toWorld(e.clientX, e.clientY);
+          scale = Math.min(Math.max(0.1, scale + -e.deltaY * 0.001), 5);
+          offsetX = e.clientX - w.x * scale;
+          offsetY = e.clientY - w.y * scale;
+          zoomText.innerText = Math.round(scale * 100) + "%";
+          render();
+        },
+        { passive: false },
+      );
+
+      function isPointInPoly(p, poly) {
+        let is = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+          if (
+            poly[i].y > p.y !== poly[j].y > p.y &&
+            p.x <
+              ((poly[j].x - poly[i].x) * (p.y - poly[i].y)) /
+                (poly[j].y - poly[i].y) +
+                poly[i].x
+          )
+            is = !is;
+        }
+        return is;
+      }
+
+      const btnMap = {
+        pen: "penBtn",
+        line: "lineBtn",
+        text: "textBtn",
+        select: "selectBtn",
+        hand: "handBtn",
+      };
+      Object.entries(btnMap).forEach(([m, id]) => {
+        document.getElementById(id).onclick = () => {
+          mode = m;
+          selectionPath = [];
+          selectedItems = [];
+          Object.values(btnMap).forEach((b) =>
+            document.getElementById(b).classList.remove("active"),
+          );
+          document.getElementById(id).classList.add("active");
+          render();
+        };
+      });
+
+      document.getElementById("undoBtn").onclick = () => {
+        if (lines.length) {
+          redoStack.push(lines.pop());
+          render();
+          saveData();
+        }
+      };
+      document.getElementById("clearBtn").onclick = () => {
+        if (confirm("초기화?")) {
+          lines = [];
+          render();
+          saveData();
+        }
+      };
+      document.getElementById("copyUrlBtn").onclick = () => {
+        navigator.clipboard
+          .writeText(window.location.href)
+          .then(() => alert("URL이 복사되었습니다! 이 링크를 공유하세요."));
+      };
+
+      window.onresize = () => {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        render();
+      };
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+
+      // 실행 시 데이터 로드
+      loadData();
+    </script>
+  </body>
+</html>
