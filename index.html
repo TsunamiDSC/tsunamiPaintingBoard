@@ -87,6 +87,7 @@
       </p>
       <input type="color" id="colorPicker" value="#ffffff" />
       <button id="penBtn" class="btn active" title="펜">✏️</button>
+      <button id="eraserBtn" class="btn" title="지우개">🧽</button>
       <button id="lineBtn" class="btn" title="직선">📏</button>
       <button id="textBtn" class="btn" title="텍스트">T</button>
       <button id="selectBtn" class="btn" title="분리 이동">✨</button>
@@ -101,6 +102,7 @@
       </div>
       <div class="zoom-info" id="zoomLevel">100%</div>
       <button id="undoBtn" class="btn">↩️</button>
+      <button id="redoBtn" class="btn">↪️</button>
       <button id="clearBtn" class="btn" style="background: #ed4245">🗑️</button>
       <button id="copyUrlBtn" class="btn" style="background: #3ba55c">
         🔗
@@ -202,16 +204,18 @@
         const w = toWorld(e.clientX, e.clientY);
         startX = e.clientX;
         startY = e.clientY;
+
         if (mode === "select") {
-          if (selectedItems.length > 0 && isPointInPoly(w, selectionPath))
+          if (selectedItems.length > 0 && isPointInPoly(w, selectionPath)) {
             isMoving = true;
-          else {
+          } else {
             selectionPath = [w];
             selectedItems = [];
             isSelecting = true;
           }
-        } else if (mode === "hand") isPanning = true;
-        else if (mode === "text") {
+        } else if (mode === "hand") {
+          isPanning = true;
+        } else if (mode === "text") {
           const t = prompt("입력:");
           if (t) {
             lines.push({
@@ -226,12 +230,19 @@
             saveData();
           }
         } else {
+          // 펜, 직선, 지우개 공통 로직
           isDrawing = true;
+
+          // 지우개일 경우 배경색(#0b0b0b) 사용, 그 외엔 선택된 색상 사용
+          const drawColor = mode === "eraser" ? "#0b0b0b" : colorPicker.value;
+          const drawOpacity = mode === "eraser" ? 1 : opInput.value / 100;
+
           currentItem = {
-            type: mode,
-            color: colorPicker.value,
+            // 지우개는 선(pen) 타입으로 그리되 색상만 다르게 처리
+            type: mode === "eraser" ? "pen" : mode,
+            color: drawColor,
             width: lwInput.value,
-            opacity: opInput.value / 100,
+            opacity: drawOpacity,
             x1: w.x,
             y1: w.y,
             x2: w.x,
@@ -244,17 +255,19 @@
 
       window.onmousemove = (e) => {
         const w = toWorld(e.clientX, e.clientY);
-        if (isSelecting) selectionPath.push(w);
-        else if (isMoving) {
+
+        if (isSelecting) {
+          selectionPath.push(w);
+        } else if (isMoving) {
           const dx = (e.clientX - startX) / scale,
             dy = (e.clientY - startY) / scale;
           selectedItems.forEach((item) => {
-            if (item.type === "pen")
+            if (item.type === "pen") {
               item.points.forEach((p) => {
                 p.x += dx;
                 p.y += dy;
               });
-            else if (item.type === "line") {
+            } else if (item.type === "line") {
               item.x1 += dx;
               item.y1 += dy;
               item.x2 += dx;
@@ -276,19 +289,29 @@
           startX = e.clientX;
           startY = e.clientY;
         } else if (isDrawing) {
-          if (mode === "pen") currentItem.points.push(w);
-          else {
+          if (currentItem.type === "pen") {
+            currentItem.points.push(w);
+          } else {
             currentItem.x2 = w.x;
             currentItem.y2 = w.y;
           }
         }
-        preview.style.display =
-          mode === "pen" || mode === "line" ? "block" : "none";
-        preview.style.width = preview.style.height =
-          lwInput.value * scale + "px";
-        preview.style.left = e.clientX + "px";
-        preview.style.top = e.clientY + "px";
-        preview.style.borderColor = colorPicker.value;
+
+        // 브러쉬 미리보기 커서 업데이트
+        const isBrushMode = ["pen", "line", "eraser"].includes(mode);
+        preview.style.display = isBrushMode ? "block" : "none";
+
+        if (isBrushMode) {
+          preview.style.width = preview.style.height =
+            lwInput.value * scale + "px";
+          preview.style.left = e.clientX + "px";
+          preview.style.top = e.clientY + "px";
+
+          // 지우개일 때는 커서가 잘 보이도록 흰색 테두리, 아니면 선택한 색상 테두리
+          preview.style.borderColor =
+            mode === "eraser" ? "#ffffff" : colorPicker.value;
+        }
+
         render();
       };
 
@@ -359,6 +382,21 @@
 
         isDrawing = isPanning = isSelecting = isMoving = false;
         currentItem = null;
+
+        if (isDrawing && currentItem) {
+          lines.push(currentItem);
+          redoStack = []; // 새로운 것을 그리면 Redo 스택을 비움
+          saveData();
+        }
+
+        if (isMoving) {
+          redoStack = []; // 이동 작업도 새로운 상태이므로 Redo 비움
+          saveData();
+        }
+
+        isDrawing = isPanning = isSelecting = isMoving = false;
+        currentItem = null;
+        render();
         render();
       };
 
@@ -393,6 +431,7 @@
 
       const btnMap = {
         pen: "penBtn",
+        eraser: "eraserBtn", // 추가
         line: "lineBtn",
         text: "textBtn",
         select: "selectBtn",
@@ -411,9 +450,21 @@
         };
       });
 
+      // 뒤로 가기 (Undo)
       document.getElementById("undoBtn").onclick = () => {
         if (lines.length) {
-          redoStack.push(lines.pop());
+          const item = lines.pop();
+          redoStack.push(item); // 꺼낸 데이터를 redoStack에 저장
+          render();
+          saveData();
+        }
+      };
+
+      // 앞으로 가기 (Redo)
+      document.getElementById("redoBtn").onclick = () => {
+        if (redoStack.length) {
+          const item = redoStack.pop();
+          lines.push(item); // redoStack에서 꺼내 다시 lines에 추가
           render();
           saveData();
         }
